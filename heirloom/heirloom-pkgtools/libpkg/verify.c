@@ -267,86 +267,74 @@ compute_checksum(int *r_cksumerr, char *a_path)
 {
 	CHECKSUM_T	suma;	/* to split four-bytes into 2 two-byte values */
 	CHECKSUM_T	tempa;
-	VFP_T		*vfp;	/* -> VFP open on file to checksum */
-	long		lg;	/* running checksum value */
-	unsigned char	*ucp;	/* -> current byte to checksum */
-	unsigned char	*uep;	/* -> last byte to checksum */
-	unsigned long	*ulep;	/* -> current quad-byte word to checksum */
-	unsigned long	lsavhi;	/* high order two-bytes of four-byte checksum */
-	unsigned long	lsavlo;	/* low order two-bytes of four-byte checksum */
+	int		fd;
+	uint32_t	lg;	/* running checksum value */
+	uint32_t	buf[CHUNK/4]; /* to read CHUNK bytes */
+	uint32_t	lsavhi;	/* high order two-bytes of four-byte checksum */
+	uint32_t	lsavlo;	/* low order two-bytes of four-byte checksum */
+	int		leap = sizeof (uint32_t);
+	int		notyet = 0;
+	int		nread;
+	struct stat64	sbuf;
 
 	/* reset error flag */
-
 	*r_cksumerr = 0;
 
 	/* open file and obtain -> where file is mapped/read */
-
-	if (vfpOpen(&vfp, a_path, "r", VFP_SEQUENTIAL) != 0) {
+	if ((fd = open(a_path, O_RDONLY)) < 0) {
 		*r_cksumerr = 1;
 		reperr(pkg_gt(ERR_NO_CKSUM));
+		perror(ERR_NO_CKSUM);
+		return (0);
+	}
+
+	if (fstat64(fd, &sbuf) != 0) {
+		*r_cksumerr = 1;
+		reperr(pkg_gt(ERR_NO_CKSUM));
+		perror(ERR_NO_CKSUM);
 		return (0);
 	}
 
 	/* initialize checksum value */
-
 	lg = 0;
 
-	/* establish -> last data byte in file */
-
-	uep = (unsigned char *)(vfpGetLastCharPtr(vfp));
-
-	/* establish -> first data byte in file */
-
-	ucp = (unsigned char *)(vfpGetFirstCharPtr(vfp));
-
 	/*
-	 * add up first few starting bytes until pointer is word aligned:
-	 * while the current byte pointer is not aligned on a unsigned long
-	 * boundary, add that byte into the checksum. By doing word-aligned
-	 * reading of the data bytes, memory access is reduced by 3/4.
+	 * Read CHUNK bytes off the file at a time; Read size of long bytes
+	 * from memory at a time and process them.
+	 * If last read, then read remnant bytes and process individually.
 	 */
+	errno = 0;
+	while ((nread = read(fd, (void*)buf,
+		    (sbuf.st_size < CHUNK) ? sbuf.st_size : CHUNK)) > 0) {
+		unsigned char *s;
+		uint32_t *p = buf;
 
-	while (((((ptrdiff_t)ucp) & LONG_BOUNDARY) != 0) && (ucp <= uep)) {
-		lg += (((int)(*ucp++)) & WDMSK);
+		notyet = nread % leap;
+		nread -= notyet;
+
+		for (; nread > 0; nread -= leap) {
+			lg += ((((*p)>>24)&0xFF) & WDMSK);
+			lg += ((((*p)>>16)&0xFF) & WDMSK);
+			lg += ((((*p)>>8)&0xFF) & WDMSK);
+			lg += (((*p)&0xFF) & WDMSK);
+			p++;
+		}
+		s = (unsigned char *)p;
+		/* leftover bytes less than four in number */
+		while (notyet--)
+			lg += (((uint32_t)(*s++)) & WDMSK);
 	}
 
-	/*
-	 * now word aligned - load one quad-byte word and add up bytes until
-	 * less than one quad-byte word left to process
-	 */
-
-	/* LINTED pointer cast may result in improper alignment */
-	ulep = ((unsigned long *)uep)-1;
-	/* LINTED pointer cast may result in improper alignment */
-	while ((unsigned long *)ucp < ulep) {
-		/* LINTED pointer cast may result in improper alignment */
-		unsigned long z = *(unsigned long *)ucp;
-		lg += (((int)(z>>24)&0xFF) & WDMSK);
-		lg += (((int)(z>>16)&0xFF) & WDMSK);
-		lg += (((int)(z>>8)&0xFF) & WDMSK);
-		lg += (((int)(z)&0xFF) & WDMSK);
-		ucp += sizeof (unsigned long);
-	}
-
-	/* add up bytes of remaining partial quad-word at end of file */
-
-	while (ucp <= uep) {
-		lg += (((int)(*ucp++)) & WDMSK);
-	}
-
-	/* close file */
-
-	(void) vfpClose(&vfp);
+	/* wind up */
+	(void) close(fd);
 
 	/* compute checksum components */
-
 	suma.lg = lg;
 	tempa.lg = (suma.hl.lo & WDMSK) + (suma.hl.hi & WDMSK);
-	lsavhi = (unsigned long)tempa.hl.hi;
-	lsavlo = (unsigned long)tempa.hl.lo;
+	lsavhi = (uint32_t)tempa.hl.hi;
+	lsavlo = (uint32_t)tempa.hl.lo;
 
 	/* return final checksum value */
-
 	return (lsavhi+lsavlo);
 }
 
